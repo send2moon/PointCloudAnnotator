@@ -47,11 +47,18 @@ class CropDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(8)
         self.spins = {}
+        _axis_tip = {
+            "X": "X 方向（沿旋转臂/行向）的裁剪范围，单位 cm，可直接改数值微调",
+            "Y": "Y 方向（垂直行向）的裁剪范围，单位 cm，可直接改数值微调",
+            "Z": "Z 方向（高度）的裁剪范围，单位 cm；去掉地面时把最小值抬到地面之上",
+        }
         for axis, idx in (("X", 0), ("Y", 1), ("Z", 2)):
             row = QHBoxLayout()
             lo, hi = _Spin(), _Spin()
             lo.setValue(float(box.lo[idx]))
             hi.setValue(float(box.hi[idx]))
+            lo.setToolTip(f"最小值：{_axis_tip[axis]}")
+            hi.setToolTip(f"最大值：{_axis_tip[axis]}")
             row.addWidget(QLabel("最小"))
             row.addWidget(lo, 1)
             row.addWidget(QLabel("最大"))
@@ -65,6 +72,7 @@ class CropDialog(QDialog):
         # 快捷操作
         quick = QHBoxLayout()
         b_all = QPushButton("重置为整个点云")
+        b_all.setToolTip("把 6 个数值恢复成整块点云的世界包围盒，等于「不裁剪」；可重新框选再来")
         b_all.clicked.connect(self._reset_all)
         quick.addWidget(b_all)
         quick.addStretch(1)
@@ -72,19 +80,23 @@ class CropDialog(QDialog):
 
         # 语义
         self.rb_keep = QRadioButton("保留框内的点（裁掉框外）")
+        self.rb_keep.setToolTip(
+            "保留框内的点、删掉框外的点：用于截出单株/小区，把周围植株和支架都去掉。")
         self.rb_remove = QRadioButton("删除框内的点（保留框外）")
+        self.rb_remove.setToolTip(
+            "删除框内的点、保留框外的点：用于去掉地面、花盆、支撑杆等干扰物。")
         self.rb_keep.setChecked(True)
         # 对话框是独立窗口，这里再单独给单选框上一次样式，
-        # 保证白色圆点/白描边一定和深色底分开（不依赖主窗口 QSS 的级联）。
+        # 保证 Office 蓝实心圆点/灰描边一定和白底分开（不依赖主窗口 QSS 级联）。
         radio_qss = (
-            "QRadioButton { color: #eef1f5; font-size: 13px; spacing: 9px;"
+            "QRadioButton { color: #24292f; font-size: 13px; spacing: 9px;"
             " padding: 3px 2px; background: transparent; }"
             "QRadioButton::indicator { width: 16px; height: 16px; border-radius: 8px;"
-            " border: 2px solid #ffffff; background: #23272d; }"
-            "QRadioButton::indicator:hover { background: #3a4048; }"
-            "QRadioButton::indicator:checked { background: #ffffff;"
-            " border: 2px solid #ffffff; }"
-            "QRadioButton:checked { color: #ffffff; font-weight: 600; }"
+            " border: 1px solid #8b949f; background: #ffffff; }"
+            "QRadioButton::indicator:hover { border-color: #2b579a; background: #f4f8fd; }"
+            "QRadioButton::indicator:checked { background: #2b579a;"
+            " border: 4px solid #ffffff; outline: 1px solid #2b579a; }"
+            "QRadioButton:checked { color: #1e3f75; font-weight: 600; }"
         )
         self.rb_keep.setStyleSheet(radio_qss)
         self.rb_remove.setStyleSheet(radio_qss)
@@ -93,13 +105,16 @@ class CropDialog(QDialog):
         lay.addWidget(self.rb_remove)
 
         tip = QLabel("提示：松开框选后可在上方微调数值；裁剪会改变点数，可用 Ctrl+Z 撤销。")
-        tip.setStyleSheet("color:#8b939d; font-size:12px;")
+        tip.setStyleSheet("color:#5a6472; font-size:12px;")
         tip.setWordWrap(True)
         lay.addWidget(tip)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("执行裁剪")
+        bb.button(QDialogButtonBox.Ok).setToolTip(
+            "按上面的范围与裁剪方式执行（可再用 Ctrl+Z 撤销）")
         bb.button(QDialogButtonBox.Cancel).setText("取消")
+        bb.button(QDialogButtonBox.Cancel).setToolTip("不裁剪，直接关闭对话框")
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)

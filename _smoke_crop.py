@@ -1,4 +1,4 @@
-"""裁剪 + 文件夹队列的离屏测试。"""
+﻿"""裁剪 + 文件夹队列的离屏测试。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from cropping import CropBox, apply_masks, compound_mask, scan_bounds
 from view3d import MODE_CROP
 from main_window import MainWindow
 
-SRC = r"D:\PCProjects\01wheat\FinalScripts\outputs\WS\FINAL_PLOTS"
+SRC = r"D:\Data\PC\ResearchPlots\WS"
 files = []
 for root, _d, names in os.walk(SRC):
     for nm in sorted(names):

@@ -142,7 +142,11 @@ class AnnotationSet:
 
     def apply(self, scan_index: int, mask: np.ndarray, label: int,
               instance: Optional[int] = None, max_points: int = 0) -> int:
-        """把 mask 命中的点标成 label/instance，返回实际标注点数。"""
+        """把 mask 命中的点标成 label/instance，返回实际标注点数。
+
+        ``instance=0`` 表示**语义标注**：只写类别、不带实例编号；
+        默认 ``None`` 表示自动分配一个新实例（实例标注）。
+        """
         if instance is None:
             instance = self.new_instance(scan_index, label) if label else 0
         lab = self.labels[scan_index]
@@ -152,9 +156,50 @@ class AnnotationSet:
             return 0
         lab[mask] = label
         ins[mask] = instance
-        if label:
+        if label and instance:
             self.instance_info[instance] = (label, scan_index)
         return n
+
+    def prune_instance_info(self, scan_index: int) -> int:
+        """清掉本站已没有点使用的实例登记，返回清理条数。
+
+        只处理登记在本站（``instance_info[uid][1] == scan_index``）的条目，
+        避免把别站的同名登记一起抹掉。
+        """
+        ins = self.instances[scan_index]
+        alive = {int(v) for v in np.unique(ins) if v != 0} if ins.size else set()
+        dead = [k for k, v in self.instance_info.items()
+                if v[1] == scan_index and k not in alive]
+        for k in dead:
+            del self.instance_info[k]
+        return len(dead)
+
+    def ensure_next_instance(self) -> None:
+        """保证 ``next_instance`` 大于所有在用编号。
+
+        清空全部 + 撤销后 ``next_instance`` 可能已被重置为 1，而数组里还留着
+        旧编号；不修就会在下次发号时撞号。
+        """
+        mx = 0
+        for ins in self.instances:
+            if ins.size:
+                mx = max(mx, int(ins.max()))
+        self.next_instance = max(int(self.next_instance), mx + 1)
+
+    def label_groups(self, scan_index: int) -> List[Tuple[int, int]]:
+        """本站「有类别但没实例编号」的点，按类别汇总为 [(label, 点数)]。
+
+        语义标注产生的点会落在这里；用于列表里的「未分实例」一行。
+        """
+        lab = self.labels[scan_index]
+        ins = self.instances[scan_index]
+        if lab.size == 0:
+            return []
+        m = (lab > 0) & (ins == 0)
+        if not m.any():
+            return []
+        vals, cnts = np.unique(lab[m], return_counts=True)
+        return [(int(v), int(c)) for v, c in zip(vals, cnts) if v > 0]
 
     def clear_scan(self, scan_index: int) -> None:
         self.labels[scan_index][:] = 0

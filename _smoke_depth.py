@@ -1,4 +1,4 @@
-"""拾取深度（框选/笔刷只标到一部分点）回归：
+﻿"""拾取深度（框选/笔刷只标到一部分点）回归：
 
 1) depth_keep 四种模式在"前层+后层+孤立噪点"上的取舍；
 2) 真实文件上同一矩形在 surface / all 两种模式下的点数差异；
@@ -25,7 +25,7 @@ from main_window import MainWindow
 from renderer import PointCloudRenderer
 from view3d import MODE_BOX
 
-SRC = r"D:\PCProjects\01wheat\FinalScripts\outputs\WS\FINAL_PLOTS"
+SRC = r"D:\Data\PC\ResearchPlots\WS"
 files = []
 for root, _d, names in os.walk(SRC):
     for nm in sorted(names):
@@ -75,6 +75,10 @@ check("全部穿透 → 所有点", k.all(), f"{int(k.sum())} 点")
 # ---------------------------------------------------------------- 2) 真实文件
 print("\n2) 真实文件同一矩形的不同深度模式")
 win = MainWindow()
+# 回归必须与"上次用的界面偏好"无关：隐藏开关是持久化的，若上次留了
+# 「隐藏已标注」，标完的点会从 project() 里消失，框选点数直接变 0。
+win.chk_hide_marked.setChecked(False)
+win.chk_hide_cur.setChecked(False)
 win.resize(1200, 800)
 win.show()
 APP.processEvents()

@@ -1,4 +1,4 @@
-"""带标注保存 + 第三方（libE57 / CloudCompare 同源）兼容性测试。
+﻿"""带标注保存 + 第三方（libE57 / CloudCompare 同源）兼容性测试。
 
 检查三件事：
 1. 原型声明的每记录字节数 == 实际写入的每记录字节数（宽度声明自洽）；
@@ -29,7 +29,7 @@ def _first_e57(root: str) -> str:
 
 
 SRC = (sys.argv[1] if len(sys.argv) > 1 else "") or _first_e57(
-    r"D:\PCProjects\01wheat\FinalScripts\outputs\WS\FINAL_PLOTS")
+    r"D:\Data\PC\ResearchPlots\WS")
 if not SRC:
     print("找不到样本 e57，跳过"); sys.exit(1)
 ok = True
@@ -94,7 +94,7 @@ check("标注字段宽度正确",
         if f.name in ("annotationLabel", "annotationInstance") ]
       == [("annotationLabel", 1), ("annotationInstance", 2)])
 # 写入 e57 的库版本字段也应是新软件名（UTF-8 XML，第三方照样能读）
-check("e57LibraryVersion 为新软件名", "作物点云器官标注软件 1.0" in text,
+check("e57LibraryVersion 为新软件名", "作物点云处理软件 2.0" in text,
       text[text.find("e57LibraryVersion"):text.find("e57LibraryVersion") + 90])
 check("不再写入旧名称", "PointCloudAnnotator 1.0" not in text)
 

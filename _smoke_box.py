@@ -1,4 +1,4 @@
-"""框选（BOO 模式）真实鼠标事件回归：防止 _apply_box 解包再次回归。"""
+﻿"""框选（BOO 模式）真实鼠标事件回归：防止 _apply_box 解包再次回归。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ APP = QApplication(sys.argv[:1])
 from main_window import MainWindow
 from view3d import MODE_BOX, MODE_CROP
 
-SRC = r"D:\PCProjects\01wheat\FinalScripts\outputs\WS\FINAL_PLOTS"
+SRC = r"D:\Data\PC\ResearchPlots\WS"
 files = []
 for root, _d, names in os.walk(SRC):
     for nm in sorted(names):

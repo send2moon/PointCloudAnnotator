@@ -1,4 +1,4 @@
-"""裁剪后标注对齐 + 保存 + 撤销 的回归测试。
+﻿"""裁剪后标注对齐 + 保存 + 撤销 的回归测试。
 
 覆盖 2026-11-02 的两个真实报错：
 * 笔刷标注 `IndexError: boolean index did not match indexed array`
@@ -23,7 +23,7 @@ from cropping import CropBox, scan_bounds
 from e57io import E57Document, check_e57_structure
 from main_window import MainWindow
 
-SRC = r"D:\PCProjects\01wheat\FinalScripts\outputs\WS\FINAL_PLOTS"
+SRC = r"D:\Data\PC\ResearchPlots\WS"
 files = []
 for root, _d, names in os.walk(SRC):
     for nm in sorted(names):

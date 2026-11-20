@@ -27,6 +27,45 @@ PALETTE = np.array([
 ], dtype=np.uint8)
 
 
+def point_in_polygon(sx, sy, poly) -> np.ndarray:
+    """向量化偶奇（even-odd）射线法：屏幕点是否落在多边形内。
+
+    从每个点向 **-x** 方向发射一条水平射线，统计它与多边形各边的交点数：
+    穿过奇数次 → 在内部，偶数次 → 在外部。因此 ``inside`` 必须**从 False
+    起算**，每命中一条边用异或翻转一次。
+
+    .. warning::
+       历史 bug：``CropView._inside_polygon`` 与 ``screen_polygon_indices``
+       都曾把初值写成 ``np.ones``，结果**内外完全颠倒**——圈住的没裁、
+       框外的全裁了，正是用户看到的「和标记区域不一致」。两处现已统一
+       调用本函数，不要再各自复制一份。
+
+    边按半开区间 ``[min(y1,y2), max(y1,y2))`` 参与判定，保证共享顶点只被
+    计一次；与 ``QPainter.drawPolygon`` 默认的 ``OddEvenFill`` 规则一致，
+    所以填充预览与命中判定对凹多边形、自交套索也保持同解。
+    """
+    sx = np.asarray(sx, np.float64)
+    sy = np.asarray(sy, np.float64)
+    p = np.asarray(poly, np.float64)
+    inside = np.zeros(sx.shape, bool)          # ← 必须是 False 起算
+    n = len(p)
+    if n < 3:
+        return inside
+    for i in range(n):
+        x1, y1 = p[i]
+        x2, y2 = p[(i + 1) % n]
+        if y1 == y2:                            # 水平边不与水平射线相交
+            continue
+        lo, hi = (y1, y2) if y1 < y2 else (y2, y1)
+        cond = (sy >= lo) & (sy < hi)
+        if not cond.any():
+            continue
+        # 该边在 y=sy 处的交点 x；分母已排除 0（y1 != y2）
+        xint = x1 + (sy - y1) * (x2 - x1) / (y2 - y1)
+        inside ^= cond & (sx < xint)
+    return inside
+
+
 @dataclass
 class Camera:
     """轨道相机：绕点云中心旋转，正交/透视可切。"""
@@ -76,6 +115,7 @@ class PointCloudRenderer:
         self.labels = np.zeros(0, np.uint8)
         self.scan_ids = np.zeros(0, np.int32)       # 每点所属扫描序号
         self.local_index = np.zeros(0, np.int64)    # 每点在其扫描内的序号
+        self.hidden = np.zeros(0, bool)             # True = 不显示（也不参与拾取）
         self.camera = Camera()
         self.color_mode = "rgb"                     # rgb | height | intensity | label
         self.point_size = 1.4
@@ -93,6 +133,9 @@ class PointCloudRenderer:
         self._img: Optional[QImage] = None
         self._proj_cache = None
         self._view_size = (0, 0)
+        # 当前着色方式对应的色条信息：(kind, lo, hi)；rgb 时为 None。
+        # kind ∈ {"height", "intensity", "label"}，供视图在坐标轴上方画色条。
+        self._legend = None
 
     # ------------------------------------------------------------ 数据 --
 
@@ -131,6 +174,7 @@ class PointCloudRenderer:
         self.intensity = np.concatenate(ins)
         self.scan_ids = np.concatenate(sid)
         self.local_index = np.concatenate(lid)
+        self.hidden = np.zeros(len(self.xyz), bool)
         self.labels = self._labels_for_display(ann)
         self.reset_camera()
         self._dirty = True
@@ -143,8 +187,33 @@ class PointCloudRenderer:
         self.labels = np.zeros(0, np.uint8)
         self.scan_ids = np.zeros(0, np.int32)
         self.local_index = np.zeros(0, np.int64)
+        self.hidden = np.zeros(0, bool)
         self._img = None
         self._dirty = True
+
+    def set_hidden(self, mask=None) -> None:
+        """设置隐藏掩膜（True = 不显示）。传 None 表示全部显示。
+
+        隐藏只影响显示与拾取：``scan_ids`` / ``local_index`` 一列不动，
+        所以隐藏期间标注、存盘仍然写回正确的扫描与点序号。
+        """
+        n = len(self.xyz)
+        if mask is None:
+            self.hidden = np.zeros(n, bool)
+        else:
+            m = np.asarray(mask, bool)
+            self.hidden = m if m.size == n else np.zeros(n, bool)
+        self._dirty = True
+
+    def visible_mask(self) -> np.ndarray:
+        """当前可见点的布尔掩膜（长度等于渲染数组）。"""
+        n = len(self.xyz)
+        if self.hidden.size != n:
+            return np.ones(n, bool)
+        return ~self.hidden
+
+    def n_visible(self) -> int:
+        return int(self.visible_mask().sum())
 
     def reset_camera(self) -> None:
         if len(self.xyz) == 0:
@@ -153,19 +222,23 @@ class PointCloudRenderer:
         if w >= 16 and h >= 16:
             self.fit_view(w, h)
             return
-        lo = self.xyz.min(axis=0).astype(np.float64)
-        hi = self.xyz.max(axis=0).astype(np.float64)
+        lo, hi = self.bounds()
         self.camera.center = ((lo + hi) / 2).astype(np.float32)
         radius = float(np.linalg.norm(hi - lo)) / 2
         self.camera.distance = max(radius / np.tan(np.radians(self.camera.fov / 2)) * 1.35, 1e-3)
         self._dirty = True
 
     def bounds(self):
-        """当前点云的世界包围盒 (lo, hi)。"""
+        """当前可见点云的世界包围盒 (lo, hi)；全部隐藏时退回全部点。"""
         if len(self.xyz) == 0:
             return np.zeros(3, np.float64), np.zeros(3, np.float64)
-        return (self.xyz.min(axis=0).astype(np.float64),
-                self.xyz.max(axis=0).astype(np.float64))
+        pts = self.xyz
+        if self.hidden.size == len(pts) and self.hidden.any():
+            vis = ~self.hidden
+            if vis.any():
+                pts = pts[vis]
+        return (pts.min(axis=0).astype(np.float64),
+                pts.max(axis=0).astype(np.float64))
 
     def fit_view(self, w: int, h: int, margin: float = 1.08) -> None:
         """让包围盒刚好填满视口（按 8 个角点的投影尺寸迭代收敛）。
@@ -258,6 +331,8 @@ class PointCloudRenderer:
         sx = (x * right[0] + y * right[1] + z * right[2]) * inv + w * 0.5
         sy = -(x * up[0] + y * up[1] + z * up[2]) * inv + h * 0.5
         inside = vis & (sx >= 0) & (sx < w) & (sy >= 0) & (sy < h)
+        if self.hidden.size == len(inside) and self.hidden.any():
+            inside &= ~self.hidden          # 隐藏点不参与显示/拾取/框选
         idx = np.nonzero(inside)[0]
         if idx.size == 0:
             return None
@@ -346,20 +421,38 @@ class PointCloudRenderer:
         return out
 
     def _colors(self, idx: np.ndarray, zmin: float, zmax: float) -> np.ndarray:
+        """按当前着色方式取颜色，并顺手记录色条信息（``self._legend``）。
+
+        高度/强度用**世界坐标 / 强度自身**的取值范围归一化（而不是相机深度），
+        这样视图上画的色条刻度与点的实际颜色一致；真彩色时不画色条。
+        """
         mode = self.color_mode
         if mode == "rgb":
+            self._legend = None
             return self.rgb[idx]
         if mode == "label":
+            self._legend = ("label", None, None)
             return PALETTE[np.clip(self.labels[idx], 0, len(PALETTE) - 1)]
         if mode == "intensity":
             v = self.intensity[idx]
             lo, hi = float(v.min()), float(v.max())
+            self._legend = ("intensity", lo, hi)
             t = (v - lo) / max(hi - lo, 1e-9)
             return self._ramp(t)
-        # height
+        # height：按世界 Z 值着色
         z = self.xyz[idx, 2]
-        t = (z - zmin) / max(zmax - zmin, 1e-9)
+        lo, hi = float(z.min()), float(z.max())
+        self._legend = ("height", lo, hi)
+        t = (z - lo) / max(hi - lo, 1e-9)
         return self._ramp(t)
+
+    def legend(self):
+        """当前色条信息：``(kind, lo, hi)`` 或 None。
+
+        kind ∈ {"height", "intensity", "label"}；label 的 lo/hi 为 None。
+        未渲染过时返回 None。
+        """
+        return getattr(self, "_legend", None)
 
     @staticmethod
     def _ramp(t: np.ndarray) -> np.ndarray:
@@ -442,24 +535,17 @@ class PointCloudRenderer:
         return sub.min(axis=0).astype(np.float64), sub.max(axis=0).astype(np.float64)
 
     def screen_polygon_indices(self, pts, w, h):
-        """套索/画笔轮廓：返回多边形内点的索引。"""
+        """套索/画笔轮廓：返回多边形内点的索引。
+
+        判定统一走 :func:`point_in_polygon`（避免早期 ``np.ones`` 起算导致
+        内外颠倒的老 bug）；这里的 40% 深度分位是标注页笔刷的历史语义，
+        与裁剪页的「全部穿透」无关，保持不变。
+        """
         proj = self.project(w, h)
         if proj is None or len(pts) < 3:
             return np.zeros(0, np.int64)
         idx, sx, sy, zc = proj
-        poly = np.array(pts, np.float64)
-        inside = np.ones(len(sx), bool)
-        n = len(poly)
-        xs = sx.astype(np.float64); ys = sy.astype(np.float64)
-        for i in range(n):
-            x1, y1 = poly[i]
-            x2, y2 = poly[(i + 1) % n]
-            if y1 == y2:
-                continue
-            cond = ((ys >= np.minimum(y1, y2)) & (ys < np.maximum(y1, y2)))
-            t = (ys - y1) / (y2 - y1 + 1e-12)
-            xint = x1 + t * (x2 - x1)
-            inside ^= cond & (xs < xint)
+        inside = point_in_polygon(sx, sy, pts)
         sel = np.nonzero(inside)[0]
         if sel.size:
             zs = zc[sel]

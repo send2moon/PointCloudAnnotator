@@ -110,6 +110,11 @@ class Scan:
     # 写成 (0,0,0,1) 会被解释成"绕 Z 轴 180°"，整份点云会镜像。
     rotation: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
     translation: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # 非标准属性（法向 nx/ny/nz、AgriTopo 的 scale_0..2、PCD 的 ring/time 等）：
+    # 只从非 e57 格式读入时填充，写回同族格式（ply/pcd）时原样带上；
+    # 不进 fields，所以不会污染 e57 的字段表，e57→ply 也不会凭空多出列。
+    extra_props: List[str] = field(default_factory=list)
+    extra_types: Dict[str, str] = field(default_factory=dict)   # 名 → numpy 类型串(f4/f8/u1/u2/i4/u4)
 
     @property
     def count(self) -> int:
@@ -1314,7 +1319,7 @@ class _Writer:
         a(f'  <guid type="String">{{{uuid.uuid4()}}}</guid>\n')
         a('  <versionMajor type="Integer">1</versionMajor>\n')
         a('  <versionMinor type="Integer">0</versionMinor>\n')
-        a('  <e57LibraryVersion type="String">作物点云器官标注软件 1.0</e57LibraryVersion>\n')
+        a('  <e57LibraryVersion type="String">作物点云处理软件 2.0</e57LibraryVersion>\n')
         a('  <coordinateMetadata type="String">')
         if doc.coordinate_metadata:
             a(doc.coordinate_metadata.replace("]]>", ""))

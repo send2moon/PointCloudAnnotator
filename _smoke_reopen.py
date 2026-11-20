@@ -22,7 +22,7 @@ QMessageBox.critical = staticmethod(lambda *a, **k: QMessageBox.Ok)
 QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Ok)
 QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.Ok)
 
-GOOD = r"D:/PCProjects/01wheat/FinalScripts/outputs/PLOTS/FINAL/1-FS_09_labeled.e57"
+GOOD = r"D:/Data/PC/ResearchPlots/DT/1-FS_09_labeled.e57"
 BAD = None      # 第 2 节里现场生成（截断副本），不依赖外部坏样本
 
 ok = True

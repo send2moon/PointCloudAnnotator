@@ -41,14 +41,14 @@ def main(argv: list[str] | None = None) -> int:
     # 英文标识只用于配置路径（QSettings），改掉会丢失 last_dir / 拾取深度等偏好
     app.setApplicationName("PointCloudAnnotator")
     app.setOrganizationName("PointCloudAnnotator")
-    app.setApplicationDisplayName("作物点云器官标注软件")
+    app.setApplicationDisplayName("作物点云处理软件")
 
     # run.bat 必须保持纯 ASCII（cmd 按 GBK 读批处理，中文会被乱码解析），
     # 所以启动器控制台的中文标题由这里用宽字符 API 设置。
     if os.name == "nt":
         try:
             import ctypes
-            ctypes.windll.kernel32.SetConsoleTitleW("作物点云器官标注软件")
+            ctypes.windll.kernel32.SetConsoleTitleW("作物点云处理软件")
         except Exception:  # noqa: BLE001  无控制台（双击启动）时忽略
             pass
 
@@ -56,7 +56,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from main_window import MainWindow
     win = MainWindow()
-    win.show()
+    # 启动即最大化：标注是"看大图"的活，窗口越宽越容易定位到单株。
+    # 取消最大化后的窗口大小取自上次关闭时记录（MainWindow._restore_last_rect）。
+    win.showMaximized()
     return app.exec()
 
 

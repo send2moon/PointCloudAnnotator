@@ -1,4 +1,4 @@
-"""离屏冒烟测试：加载 -> 渲染 -> 标注 -> 保存 -> 重新读取校验。
+﻿"""离屏冒烟测试：加载 -> 渲染 -> 标注 -> 保存 -> 重新读取校验。
 
 在无显示环境下用 offscreen 平台运行，输出截图与断言结果。
 """
@@ -24,9 +24,9 @@ from renderer import PointCloudRenderer
 from view3d import PointCloudView, MODE_BRUSH, MODE_BOX
 from main_window import MainWindow
 
-SRC = r"D:\PCProjects\01wheat\FinalScripts\outputs\WS\FINAL_PLOTS"
+SRC = r"D:\Data\PC\ResearchPlots\WS"
 if not os.path.isdir(SRC):
-    SRC = r"D:\PCProjects\01wheat\FinalScripts\outputs\PLOTS\FINAL"
+    SRC = r"D:\Data\PC\ResearchPlots\DT"
 files = []
 for root, _dirs, names in os.walk(SRC):
     for nm in sorted(names):
@@ -124,7 +124,7 @@ r.color_mode = "rgb"
 print(f"   标注着色渲染完成，非背景像素 {non_bg(img4):,}")
 
 # ---------------------------------------------------------------- 5. 保存
-out = os.path.join(r"D:\PCProjects\01wheat\PointCloudAnnotator", "_smoke_out.e57")
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_smoke_out.e57")
 MainWindow._attach_annotation(s0, ann.labels[0], ann.instances[0])
 t0 = time.perf_counter()
 doc.save(out)
@@ -163,7 +163,7 @@ APP.processEvents()
 check("窗口载入", win.doc is not None)
 print("   列表项:", win.lst.count(), "| 统计:", win.lbl_stat.text().replace("\n", " / "))
 shot = win.grab()
-shot.save(r"D:\PCProjects\01wheat\PointCloudAnnotator\_smoke_window.png")
+shot.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_smoke_window.png"))
 print(f"   截图 {shot.width()}x{shot.height()}")
 
 print("\n" + ("*** ALL CHECKS PASSED ***" if ok else "*** SOME CHECKS FAILED ***"))

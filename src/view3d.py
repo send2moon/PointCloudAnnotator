@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal, QTimer
-from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPainter, QPainterPath,
-                           QPen, QPolygonF, QCursor)
+from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QLinearGradient, QPainter,
+                           QPainterPath, QPen, QPolygonF, QCursor)
 from PySide6.QtWidgets import QWidget, QApplication
 
 from renderer import PointCloudRenderer, PALETTE
@@ -18,6 +19,152 @@ MODE_BRUSH = "brush"
 MODE_ERASE = "erase"
 MODE_BOX = "box"
 MODE_CROP = "crop"
+MODE_INST = "inst"       # 手动框选穗实例
+
+
+# ----------------------------------------------------------- 实例框 --
+
+# 立方体 8 个顶点的 12 条棱（顶点编号：x 最低位，其次 y，最高位 z）
+BOX_EDGES = ((0, 1), (2, 3), (4, 5), (6, 7),      # 沿 X
+             (0, 2), (1, 3), (4, 6), (5, 7),      # 沿 Y
+             (0, 4), (1, 5), (2, 6), (3, 7))      # 沿 Z
+
+
+def instance_box_color(uid: int) -> Tuple[int, int, int]:
+    """按实例编号取一个稳定的辨识色（HSV 色环按 47° 步进打散）。"""
+    h = ((int(uid) * 47) % 360) / 360.0
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(h, 0.72, 1.0)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+# ------------------------------------------------- 坐标轴 + 色条（共用） --
+
+AXIS_COLORS = ((238, 92, 92), (108, 214, 132), (104, 162, 255))   # X Y Z
+AXIS_NAMES = ("X", "Y", "Z")
+LABEL_NAMES = ("未标注", "穗", "叶", "茎", "其他")
+
+
+def _fmt_num(v: float) -> str:
+    if v is None:
+        return ""
+    a = abs(v)
+    if a >= 100000:
+        return f"{v:.3g}"
+    if a < 0.005:            # 贴近 0 的浮点噪声按 0 显示，避免 4.57e-05 这种刻度
+        return "0.00"
+    return f"{v:.2f}"
+
+
+def _draw_legend(p: QPainter, renderer, cx: float, cy: float, ring: float) -> None:
+    """在坐标轴圆盘正上方画色条（仅高度/强度/标注三种着色）。"""
+    leg = renderer.legend() if hasattr(renderer, "legend") else None
+    if not leg:
+        return
+    kind, lo, hi = leg
+    f = QFont(); f.setPointSize(8); p.setFont(f)
+    if kind in ("height", "intensity"):
+        bw, bh = 14.0, 110.0
+        x0 = cx - bw / 2
+        y1 = cy - ring - 16          # 色条底边（圆盘上方留 16 px）
+        y0 = y1 - bh
+        if y0 < 4:
+            bh = max(50.0, y1 - 4); y0 = y1 - bh
+        grad = QLinearGradient(x0, y1, x0, y0)   # 下=小值，上=大值
+        steps = 10
+        for i in range(steps + 1):
+            t = i / steps
+            rgb = renderer._ramp(np.array([t]))[0]
+            grad.setColorAt(t, QColor(int(rgb[0]), int(rgb[1]), int(rgb[2])))
+        p.setPen(QPen(QColor(74, 80, 90), 1.0))
+        p.setBrush(QBrush(grad))
+        p.drawRect(QRectF(x0, y0, bw, bh))
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QColor(232, 234, 238))
+        unit = " m" if kind == "height" else ""
+        p.drawText(QRectF(x0 + bw + 4, y0 - 8, 78, 14),
+                   Qt.AlignLeft | Qt.AlignVCenter, _fmt_num(hi) + unit)
+        p.drawText(QRectF(x0 + bw + 4, y1 - 6, 78, 14),
+                   Qt.AlignLeft | Qt.AlignVCenter, _fmt_num(lo) + unit)
+        p.setPen(QColor(200, 205, 212))
+        p.drawText(QRectF(x0 - 28, y0 - 22, 90, 14),
+                   Qt.AlignLeft | Qt.AlignVCenter,
+                   "高度" if kind == "height" else "强度")
+    else:                             # 标注：分类色块 + 名称
+        n = len(PALETTE)
+        sh, bw = 18.0, 16.0
+        x0 = cx - bw / 2
+        y1 = cy - ring - 16
+        y0 = y1 - sh * n
+        f.setPointSize(7)
+        p.setFont(f)
+        for i in range(n):
+            idx = n - 1 - i           # 顶部放编号大的，底部放「未标注」
+            top = y0 + i * sh
+            p.setPen(QPen(QColor(74, 80, 90), 1.0))
+            p.setBrush(QBrush(QColor(*PALETTE[idx])))
+            p.drawRect(QRectF(x0, top, bw, sh))
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QColor(232, 234, 238))
+            p.drawText(QRectF(x0 + bw + 4, top, 60, sh),
+                       Qt.AlignLeft | Qt.AlignVCenter, LABEL_NAMES[idx])
+
+
+def draw_axis_and_legend(p: QPainter, renderer, w: int, h: int,
+                         with_legend: bool = True) -> None:
+    """右下角坐标轴指示器 + 其正上方的色条（CloudCompare 风格）。
+
+    两个功能页的三维视图都调用它，保证朝向指示与色条位置一致。
+    """
+    if len(getattr(renderer, "xyz", ())) == 0:
+        return
+    _eye, _fwd, right, up = renderer.camera.basis()
+    r = 40.0 if w > 520 else 30.0
+    ring = r + 20.0
+    cx = w - ring - 20
+    cy = h - ring - 20
+
+    p.setRenderHint(QPainter.Antialiasing, True)
+    if with_legend:
+        _draw_legend(p, renderer, cx, cy, ring)
+
+    p.setPen(QPen(QColor(74, 80, 90), 1.0))
+    p.setBrush(QBrush(QColor(22, 25, 30, 170)))
+    p.drawEllipse(QPointF(cx, cy), ring, ring)
+
+    f = QFont(); f.setPointSize(8); f.setBold(True)
+    p.setFont(f)
+    for name, vec, col in zip(AXIS_NAMES,
+                              ((1, 0, 0), (0, 1, 0), (0, 0, 1)),
+                              AXIS_COLORS):
+        v = np.asarray(vec, np.float64)
+        dx = float(v @ right)
+        dy = -float(v @ up)
+        color = QColor(*col)
+        pen = QPen(color, 2.0)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        tip = QPointF(cx + dx * r, cy + dy * r)
+        p.drawLine(QPointF(cx, cy), tip)
+        ang = math.atan2(tip.y() - cy, tip.x() - cx)
+        for s in (1.0, -1.0):
+            p.drawLine(tip, QPointF(tip.x() - 7.5 * math.cos(ang - s * 0.42),
+                                    tip.y() - 7.5 * math.sin(ang - s * 0.42)))
+        p.setPen(color)
+        p.drawText(QRectF(cx + dx * (r + 12) - 8, cy + dy * (r + 12) - 8, 16, 16),
+                   Qt.AlignCenter, name)
+    p.setBrush(Qt.NoBrush)
+
+
+@dataclass
+class Box3D:
+    """世界坐标轴对齐的立方体框（用于穗实例的突出显示 / 分割预览）。"""
+    lo: np.ndarray                       # (3,) 世界坐标下角
+    hi: np.ndarray                       # (3,) 世界坐标上角
+    text: str = ""                       # 框顶显示的编号
+    color: Tuple[int, int, int] = (120, 200, 255)
+    dashed: bool = False                 # True = 预览框（虚线）
 
 
 class PointCloudView(QWidget):
@@ -31,6 +178,7 @@ class PointCloudView(QWidget):
 
     hoverInfo = Signal(str)
     annotateRequest = Signal(object, int, int)   # (mask_bool_global, label, action)
+    instanceRequest = Signal(object)             # (sel_global) 手动框选穗实例
     cropRequest = Signal(object)                 # (rect_local: QRect) 框选裁剪
     escapePressed = Signal()
     viewChanged = Signal()
@@ -50,6 +198,9 @@ class PointCloudView(QWidget):
         self.single_click = False
         self.show_axes = True
         self.show_bbox = False
+        self.show_instance_boxes = False      # 穗实例立方体框开关
+        self.instance_boxes: List[Box3D] = [] # 已编号实例的框
+        self.preview_boxes: List[Box3D] = []  # 分割试算的预览框（虚线）
 
         self._last_pos = QPoint()
         self._drag_btn = None
@@ -92,11 +243,27 @@ class PointCloudView(QWidget):
         self._panning = False
         self._drag_btn = None
         self._img = None
+        self.instance_boxes = []
+        self.preview_boxes = []
         self.set_mode(MODE_NAV)
         self._schedule()
 
+    def set_instance_boxes(self, boxes: List[Box3D]) -> None:
+        """更新已编号实例的立方体框（世界坐标，随相机一起转动）。"""
+        self.instance_boxes = list(boxes or [])
+        self.update()
+
+    def set_preview_boxes(self, boxes: List[Box3D]) -> None:
+        """更新分割试算的预览框；传空列表即清除预览。"""
+        self.preview_boxes = list(boxes or [])
+        self.update()
+
     def refresh_labels(self, ann) -> None:
         self.renderer.refresh_labels(ann)
+        self._schedule()
+
+    def redraw(self) -> None:
+        """可见性 / 数据变化后重新光栅化（相机不动）。"""
         self._schedule()
 
     def reset_view(self) -> None:
@@ -179,6 +346,10 @@ class PointCloudView(QWidget):
             if self.mode == MODE_CROP:
                 p.setPen(QPen(QColor(255, 190, 90), 1.6, Qt.DashLine))
                 p.setBrush(QBrush(QColor(255, 190, 90, 30)))
+            elif self.mode == MODE_INST:
+                # 穗实例框选用穗类别的红色，和普通标注区分开
+                p.setPen(QPen(QColor(255, 96, 96), 1.6, Qt.DashLine))
+                p.setBrush(QBrush(QColor(255, 96, 96, 40)))
             else:
                 p.setPen(QPen(QColor(120, 200, 255), 1.4, Qt.DashLine))
                 p.setBrush(QBrush(QColor(120, 200, 255, 36)))
@@ -186,6 +357,7 @@ class PointCloudView(QWidget):
 
         # 坐标轴 / 包围盒叠加
         self._draw_size_tag(p)
+        self._draw_boxes(p)
         if self.show_bbox:
             self._draw_bbox(p)
         if self.show_axes:
@@ -216,6 +388,13 @@ class PointCloudView(QWidget):
             f = QFont(); f.setPointSize(9); p.setFont(f)
             p.drawText(14, self.height() - 14,
                        "框选裁剪：拖出矩形后选择保留/删除框内点  Esc 退出")
+        elif self.mode == MODE_INST:
+            p.setRenderHint(QPainter.Antialiasing, False)
+            p.setPen(QColor(255, 140, 140))
+            f = QFont(); f.setPointSize(9); p.setFont(f)
+            p.drawText(14, self.height() - 14,
+                       "穗实例：框住一根穗的穗点，松手即归为新实例"
+                       "（Ctrl+拖拽 = 穿透全部深度，Ctrl+Z 撤销）")
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -223,46 +402,71 @@ class PointCloudView(QWidget):
 
     # ------------------------------------------------------ 叠加层绘制 --
 
-    AXIS_COLORS = ((238, 92, 92), (108, 214, 132), (104, 162, 255))   # X Y Z
-    AXIS_NAMES = ("X", "Y", "Z")
+    AXIS_COLORS = AXIS_COLORS
+    AXIS_NAMES = AXIS_NAMES
 
     def _draw_axes(self, p: QPainter) -> None:
-        """右下角坐标轴指示器（与 CloudCompare 的样式一致）。"""
-        if len(self.renderer.xyz) == 0:
-            return
-        _eye, _fwd, right, up = self.renderer.camera.basis()
-        r = 40.0 if self.width() > 520 else 30.0
-        ring = r + 20.0
-        cx = self.width() - ring - 20
-        cy = self.height() - ring - 20
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setPen(QPen(QColor(74, 80, 90), 1.0))
-        p.setBrush(QBrush(QColor(22, 25, 30, 170)))
-        p.drawEllipse(QPointF(cx, cy), ring, ring)
+        """右下角坐标轴指示器 + 其正上方的色条（与 CloudCompare 的样式一致）。"""
+        draw_axis_and_legend(p, self.renderer, self.width(), self.height(),
+                             with_legend=True)
 
+    def _draw_boxes(self, p: QPainter) -> None:
+        """穗实例立方体框 + 编号；试算预览用虚线框，顶部加提示条。
+
+        预览期间不再画实线框：两批框叠在一起编号会糊成一团，预览本来就
+        是为了看"换成这组参数会长什么样"。
+        """
+        if self.preview_boxes:
+            boxes = list(self.preview_boxes)
+        else:
+            boxes = list(self.instance_boxes) if self.show_instance_boxes else []
+        if not boxes or len(self.renderer.xyz) == 0:
+            return
+        w, h = self.width(), self.height()
+        p.setRenderHint(QPainter.Antialiasing, True)
         f = QFont(); f.setPointSize(8); f.setBold(True)
         p.setFont(f)
-        for name, vec, col in zip(self.AXIS_NAMES,
-                                  ((1, 0, 0), (0, 1, 0), (0, 0, 1)),
-                                  self.AXIS_COLORS):
-            v = np.asarray(vec, np.float64)
-            dx = float(v @ right)
-            dy = -float(v @ up)
-            color = QColor(*col)
-            pen = QPen(color, 2.0)
-            pen.setCapStyle(Qt.RoundCap)
+        fm = p.fontMetrics()
+        for b in boxes:
+            lo = np.asarray(b.lo, np.float64)
+            hi = np.asarray(b.hi, np.float64)
+            if lo.shape != (3,) or hi.shape != (3,) or not np.all(hi >= lo):
+                continue
+            corners = np.array([[x, y, z] for x in (lo[0], hi[0])
+                                for y in (lo[1], hi[1]) for z in (lo[2], hi[2])],
+                               np.float64)
+            sx, sy, zc = self.renderer.project_points(corners, w, h)
+            if not np.all(zc > 1e-6):
+                continue                      # 有顶点在相机后面，画出来会翻转
+            if sx.max() < -40 or sx.min() > w + 40 or sy.max() < -40 or sy.min() > h + 40:
+                continue                      # 整框在屏幕外
+            col = QColor(*b.color)
+            pen = QPen(col, 1.4)
+            if b.dashed:
+                pen.setStyle(Qt.DashLine)
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
-            tip = QPointF(cx + dx * r, cy + dy * r)
-            p.drawLine(QPointF(cx, cy), tip)
-            ang = math.atan2(tip.y() - cy, tip.x() - cx)
-            for s in (1.0, -1.0):
-                p.drawLine(tip, QPointF(tip.x() - 7.5 * math.cos(ang - s * 0.42),
-                                        tip.y() - 7.5 * math.sin(ang - s * 0.42)))
-            p.setPen(color)
-            p.drawText(QRectF(cx + dx * (r + 12) - 8, cy + dy * (r + 12) - 8, 16, 16),
-                       Qt.AlignCenter, name)
-        p.setBrush(Qt.NoBrush)
+            for a, c in BOX_EDGES:
+                p.drawLine(QPointF(sx[a], sy[a]), QPointF(sx[c], sy[c]))
+            # 编号：写在框顶面中心的正上方，带底色小牌，避免与点云混在一起
+            if b.text and (sx.max() - sx.min() >= 8 or sy.max() - sy.min() >= 8):
+                anchor = np.array([(lo[0] + hi[0]) * 0.5,
+                                   (lo[1] + hi[1]) * 0.5, hi[2]], np.float64)
+                ax, ay, az = self.renderer.project_points(anchor.reshape(1, 3), w, h)
+                if az[0] > 1e-6:
+                    tw = fm.horizontalAdvance(b.text)
+                    r = QRectF(float(ax[0]) - tw / 2 - 4, float(ay[0]) - fm.height() - 5,
+                               tw + 8, fm.height() + 2)
+                    p.setPen(QPen(col, 1.0))
+                    p.setBrush(QBrush(QColor(22, 25, 30, 205)))
+                    p.drawRoundedRect(r, 4, 4)
+                    p.setPen(col)
+                    p.drawText(r, Qt.AlignCenter, b.text)
+        # 预览模式提示条
+        if self.preview_boxes:
+            p.setRenderHint(QPainter.Antialiasing, False)
+            p.setPen(QColor(255, 205, 90))
+            p.drawText(14, 46, "穗分割预览（虚线框 = 将生成的穗，编号为分配后的实例号；未写入标注）")
 
     def _draw_bbox(self, p: QPainter) -> None:
         """世界包围盒线框（红色，借鉴 CloudCompare 的显示方式）。"""
@@ -336,7 +540,7 @@ class PointCloudView(QWidget):
                 return
             # 标注
             pos = ev.position().toPoint()
-            if self.mode in (MODE_BOX, MODE_CROP):
+            if self.mode in (MODE_BOX, MODE_CROP, MODE_INST):
                 self._box = (pos, pos)
                 self.update()
             else:
@@ -531,6 +735,10 @@ class PointCloudView(QWidget):
                                                 depth_mode=depth_mode)
         if sel.size == 0:
             self.hoverInfo.emit("框内没有点")
+            return
+        if self.mode == MODE_INST:
+            # 手动穗实例：选中集交给主窗口去发编号（只动 label==1 的穗点）
+            self.instanceRequest.emit(sel)
             return
         label = 0 if self.mode == MODE_ERASE else self.current_label
         self.annotateRequest.emit(sel, label, 0)

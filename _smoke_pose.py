@@ -1,4 +1,4 @@
-"""多站扫描 + pose 测试。
+﻿"""多站扫描 + pose 测试。
 
 回答一个常被问到的问题：多站 e57 **不需要先合并**，软件按扫描逐个写出；
 两种保存方式都对：
@@ -24,7 +24,7 @@ from e57io import E57Document, check_e57_structure
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else ""
 if not SRC:
-    for d, _s, names in os.walk(r"D:\PCProjects\01wheat\FinalScripts\outputs\PLOTS\FINAL"):
+    for d, _s, names in os.walk(r"D:\Data\PC\ResearchPlots\DT"):
         for nm in sorted(names):
             if not nm.lower().endswith(".e57") or "labeled" in nm.lower():
                 continue
