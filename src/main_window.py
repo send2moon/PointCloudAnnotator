@@ -23,6 +23,8 @@ from annotation import AnnotationSet, LABEL_NAMES, LABEL_COLORS
 from cropping import CropBox, apply_masks, compound_mask, scan_bounds
 from crop_dialog import CropDialog
 from crop_page import CropPage
+from review_page import ReviewPage
+from review_session import ReviewSession
 import cloudio
 from e57io import E57Document, StructureError
 from instance_seg import SegmentParams, segment_points
@@ -35,9 +37,10 @@ from view3d import (PointCloudView, MODE_NAV, MODE_BRUSH, MODE_ERASE,
                     MODE_BOX, MODE_CROP, MODE_INST, Box3D, instance_box_color)
 
 APP_NAME = "作物点云处理软件"
-APP_VER = "2.0"
+APP_VER = "2.1"
 MODULE_ANNOT = "器官标注"
 MODULE_CROP = "点云裁剪"
+MODULE_REVIEW = "标注核查"
 # 内部英文标识：QSettings 组织名 / e57 库标识沿用旧值，避免用户配置丢失
 APP_ID = "PointCloudAnnotator"
 
@@ -111,7 +114,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 640)
         self._split = None
         self._panel_dragged = False    # 用户手动拖过分隔条后就不再自动调宽
-        self._page = 0                # 0 = 器官标注，1 = 点云裁剪
+        self._page = 0                # 0 = 器官标注，1 = 点云裁剪，2 = 标注核查
         self._canvas_name = "深色（默认）"
         self.setStyleSheet(OFFICE_QSS)
 
@@ -200,13 +203,16 @@ class MainWindow(QMainWindow):
         split.splitterMoved.connect(self._on_split_moved)
         self._split = split
 
-        # 两个功能页共用一个主窗口，但数据与操作完全隔离：
+        # 三个功能页共用一个主窗口，但数据与操作完全隔离：
         #   页 0 = 器官标注（原「三维视图 + 侧栏」）
         #   页 1 = 点云裁剪（CropPage 自带文件列表、视图、参数与保存）
+        #   页 2 = 标注核查（Point-SAM 交互分割及标注修正）
         self.crop_page = CropPage()
+        self.review_page = ReviewPage()
         self._pages = QStackedWidget()
         self._pages.addWidget(split)
         self._pages.addWidget(self.crop_page)
+        self._pages.addWidget(self.review_page)
         self.setCentralWidget(self._pages)
         # 导航条要先于功能区 addToolBar，才会排在功能区上方（Office 选项卡行）
         self._build_nav_bar()
@@ -229,13 +235,16 @@ class MainWindow(QMainWindow):
         self.status.addPermanentWidget(self.lbl_hover, 1)
         self.status.addPermanentWidget(self.lbl_perf, 0)
         self.crop_page.statusMessage.connect(self.status.showMessage)
+        self.review_page.statusMessage.connect(self.status.showMessage)
+        self.review_page.stateChanged.connect(self._update_title)
+        self.review_page.importRequested.connect(self._import_for_review)
 
         self._on_depth_mode()          # 把侧栏里的拾取深度同步给渲染器
 
     # ------------------------------------------------------- 功能页导航 --
 
     def _build_nav_bar(self) -> None:
-        """Office 风格顶部选项卡行：蓝底白字标题 + 两个功能页按钮。"""
+        """Office 风格顶部选项卡行：蓝底白字标题 + 三个功能页按钮。"""
         nav = QToolBar("功能导航")
         nav.setObjectName("navBar")
         nav.setMovable(False)
@@ -261,13 +270,17 @@ class MainWindow(QMainWindow):
         self._nav_group.setExclusive(True)
         self.btn_page_annot = QToolButton()
         self.btn_page_crop = QToolButton()
+        self.btn_page_review = QToolButton()
         for b, text, tip in (
                 (self.btn_page_annot, MODULE_ANNOT,
                  "器官标注：给穗 / 叶 / 茎打类别与实例编号，可分割单穗、修改已有标注。\n"
                  "已有标注的点云用这一页处理；标注数据写进 annotationLabel / annotationInstance。"),
                 (self.btn_page_crop, MODULE_CROP,
                  "点云裁剪：加载文件夹、按矩形或任意多边形圈区域、绕轴旋转、另存或覆盖保存。\n"
-                 "这一页只改几何与文件，不写标注；也可调用配准脚本用 PLY 参考裁剪 E57。")):
+                 "这一页只改几何与文件，不写标注；也可调用配准脚本用 PLY 参考裁剪 E57。"),
+                (self.btn_page_review, MODULE_REVIEW,
+                 "标注核查：使用 Point-SAM 正负点交互分割，预览后补标、修正类别或实例边界。\n"
+                 "可打开已有标注文件，或复制器官标注页当前结果；保存前不会修改原文件。")):
             b.setText(text)
             b.setObjectName("navTab")
             b.setCheckable(True)
@@ -278,12 +291,13 @@ class MainWindow(QMainWindow):
         self.btn_page_annot.setChecked(True)
         self.btn_page_annot.clicked.connect(lambda: self.switch_page(0))
         self.btn_page_crop.clicked.connect(lambda: self.switch_page(1))
+        self.btn_page_review.clicked.connect(lambda: self.switch_page(2))
 
         spacer = QWidget()
         spacer.setStyleSheet("background: transparent;")
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         nav.addWidget(spacer)
-        hint = QLabel("两个页面各自管理自己的文件与未保存改动")
+        hint = QLabel("三个页面各自管理文件与未保存改动")
         hint.setStyleSheet("color:#c8daf3; background:transparent; font-size:11px;"
                            " padding-right:14px;")
         nav.addWidget(hint)
@@ -331,8 +345,8 @@ class MainWindow(QMainWindow):
         tb.setVisible(False)
 
     def switch_page(self, index: int) -> None:
-        """在「器官标注」与「点云裁剪」之间切换。"""
-        idx = 1 if index else 0
+        """切换器官标注、点云裁剪和标注核查，隔离各页快捷键。"""
+        idx = index if index in (0, 1, 2) else 0
         if idx == self._page and self._pages.currentIndex() == idx:
             return
         self._page = idx
@@ -340,7 +354,7 @@ class MainWindow(QMainWindow):
         self._apply_page_state()
         self._update_title()
         self.status.showMessage(
-            f"已切换到「{MODULE_CROP if idx else MODULE_ANNOT}」", 2500)
+            f"已切换到「{(MODULE_ANNOT, MODULE_CROP, MODULE_REVIEW)[idx]}」", 2500)
 
     def _apply_page_state(self) -> None:
         """页面显隐 + 快捷键隔离（同一个 QMainWindow 不能有两套同名快捷键）。"""
@@ -348,10 +362,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_tb_annot"):
             self._tb_annot.setVisible(annot)
         if hasattr(self, "_tb_crop"):
-            self._tb_crop.setVisible(not annot)
+            self._tb_crop.setVisible(self._page == 1)
+        if hasattr(self, "_tb_review"):
+            self._tb_review.setVisible(self._page == 2)
         self.btn_page_annot.setChecked(annot)
-        self.btn_page_crop.setChecked(not annot)
-        self.crop_page.set_shortcuts_enabled(not annot)
+        self.btn_page_crop.setChecked(self._page == 1)
+        self.btn_page_review.setChecked(self._page == 2)
+        self.crop_page.set_shortcuts_enabled(self._page == 1)
+        self.review_page.set_shortcuts_enabled(self._page == 2)
         if annot:
             for a in self._plain_actions():
                 a.setEnabled(True)
@@ -609,6 +627,11 @@ class MainWindow(QMainWindow):
             "标细节（芒、小穗）时调小一点，避免相邻点糊成一片。")
         self.sld_size.valueChanged.connect(self._on_point_size)
         row_color.addWidget(self.sld_size, 4)
+        self.lbl_point_size = QLabel(f"{self.sld_size.value() / 10.0:.1f}")
+        self.lbl_point_size.setMinimumWidth(26)
+        self.lbl_point_size.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_point_size.setToolTip("当前点大小，与左侧滑块同步更新；只影响显示。")
+        row_color.addWidget(self.lbl_point_size)
         f.addRow("显示", row_color)
 
         self.cmb_canvas = QComboBox()
@@ -875,6 +898,43 @@ class MainWindow(QMainWindow):
         self.lbl_title.setObjectName("hint")
         tb.addWidget(self.lbl_title)
         self._build_crop_ribbon()
+        self._build_review_ribbon()
+
+    def _build_review_ribbon(self):
+        toolbar = QToolBar("核查功能")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        self._tb_review = toolbar
+        page = self.review_page
+        for text, callback, tip in (
+            ("打开待核查点云…", page.open_file, "打开已有标注或未标注点云，保留原始点序和属性。"),
+            ("载入标注页结果", self._import_for_review, "复制标注页当前内存中的结果，包含尚未保存的修改。"),
+            ("检测模型环境", page.probe, "检测 b2l 解释器、CUDA、Point-SAM 源码和官方权重。"),
+            ("运行 Point-SAM", page.run_model, "先添加正点或负点，再运行分割；结果需要手动应用。"),
+            ("撤销修正", page.undo, "撤销标注核查页上一次已应用的修改（Ctrl+Z）。"),
+            ("保存核查结果…", page.save_as, "将核查结果另存为点云文件（Ctrl+S），成功后弹窗提示。"),
+            ("关闭当前文件", page.close_file, "关闭核查页文件（Ctrl+W），有未保存修正时先提醒。")):
+            button = QToolButton()
+            button.setText(text)
+            button.setToolTip(tip)
+            button.clicked.connect(callback)
+            toolbar.addWidget(button)
+        toolbar.setVisible(False)
+
+    def _import_for_review(self):
+        page = self.review_page
+        if self.doc is None or self.ann is None:
+            QMessageBox.information(self, "载入标注页结果", "请先在器官标注页打开一个点云文件。")
+            return
+        if page.runner.busy or not page.confirm_discard():
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            session = ReviewSession.copy_from(self.doc, self.path or "", self.ann, self._dirty)
+            page.set_session(session)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.switch_page(2)
 
     def _maybe_open_from_args(self) -> None:
         import sys
@@ -1024,7 +1084,7 @@ class MainWindow(QMainWindow):
             self.lbl_perf.setText(f"读取 {el*1000:.0f} ms")
             self.settings.setValue("last_dir", os.path.dirname(path))
             self.settings.setValue("last_ext", cloudio.ext_of(path))
-            self._dirty = ann.total_marked() > 0
+            self._dirty = False  # 读取已有标注不等于产生了未保存的修改。
             self.chk_all_scans.setEnabled(len(doc.scans) > 1)
             self.chk_all_scans.setChecked(True)
             # 位姿只对 e57 有意义（其它格式读进来就是已烘焙的坐标）
@@ -1071,8 +1131,12 @@ class MainWindow(QMainWindow):
         return box.clickedButton() is b_open
 
     def _confirm_discard(self) -> bool:
-        r = QMessageBox.question(self, APP_NAME, "当前标注尚未保存，是否放弃？",
-                                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        r = QMessageBox.question(
+            self, "未保存的改动",
+            f"器官标注页有未保存的改动：\n{self.path or '未命名点云'}\n\n"
+            "是否先保存？选择放弃将丢弃这些改动。",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Cancel)
         if r == QMessageBox.Save:
             # e57 是"标注文件"，直接写回；ply/pcd/xyz 往往是原始数据，
             # 覆盖它会毁掉原始点云，所以走「另存为」让人挑路径与格式。
@@ -1169,7 +1233,7 @@ class MainWindow(QMainWindow):
                          "本软件重开、CloudCompare 打开都能看到；\n"
                          "若要长期归档，建议同时留一份 e57。")
             QMessageBox.information(self, APP_NAME,
-                                    f"已保存（{what}）：\n{path}\n\n"
+                                    f"保存成功（{what}）：\n{path}\n\n"
                                     f"点云 {self.doc.total_points:,} 个，"
                                     f"标注 {self.ann.total_marked():,} 个点。" + extra)
         except Exception as e:  # noqa: BLE001
@@ -1422,6 +1486,7 @@ class MainWindow(QMainWindow):
 
     def _on_point_size(self, v: int) -> None:
         self.view.set_point_size(v / 10.0)
+        self.lbl_point_size.setText(f"{v / 10.0:.1f}")
 
     def _on_color_mode(self, i: int) -> None:
         self.view.set_color_mode(["rgb", "height", "intensity", "label"][i])
@@ -2147,13 +2212,23 @@ class MainWindow(QMainWindow):
         self._update_instance_boxes()      # 实例框跟着切到这一站
 
     def _update_title(self) -> None:
-        base = os.path.basename(self.path) if self.path else "未打开文件"
-        star = " *" if self._dirty else ""
-        module = MODULE_CROP if getattr(self, "_page", 0) else MODULE_ANNOT
+        page = getattr(self, "_page", 0)
+        path = self.review_page.path if page == 2 else self.crop_page.path if page == 1 else self.path
+        dirty = self.review_page.dirty if page == 2 else self.crop_page.has_unsaved_changes() if page == 1 else self._dirty
+        base = os.path.basename(path) if path else "未打开文件"
+        star = " *" if dirty else ""
+        module = (MODULE_ANNOT, MODULE_CROP, MODULE_REVIEW)[page]
         self.setWindowTitle(f"{APP_NAME}  ·  {module}  v{APP_VER}  —  {base}{star}")
 
     def closeEvent(self, ev):
         if self._dirty and not self._confirm_discard():
+            ev.ignore()
+            return
+        # 两页独立持有文档；退出时也检查当前未显示的裁剪页。
+        if not self.crop_page._confirm_discard():
+            ev.ignore()
+            return
+        if not self.review_page.confirm_discard():
             ev.ignore()
             return
         # 记住"非最大化"时的窗口大小：下次启动仍最大化，但取消最大化后是熟悉的大小
@@ -2163,4 +2238,5 @@ class MainWindow(QMainWindow):
                 self.settings.setValue("last_rect", r)
         except Exception:                       # noqa: BLE001
             pass
+        self.review_page.shutdown()
         ev.accept()

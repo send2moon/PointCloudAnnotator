@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/zyc00/Point-SAM",
+  "model_repository": "https://huggingface.co/yuchen0187/Point-SAM",
+  "revision": "fb2cd5cd8047e3681491d82fc41b880a9a914fc8",
+  "sha256": "bfe0aa4fee2d3c08251271e597954e6a2d26209d003c724d0ff049f578410ab2",
+  "size": 1244245632
+}

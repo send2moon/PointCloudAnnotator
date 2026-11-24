@@ -88,7 +88,7 @@ win = MainWindow()
 win.resize(1600, 1000)
 win.show()
 APP.processEvents()
-check("中心部件是两页容器", win._pages.count() == 2)
+check("中心部件是三页容器", win._pages.count() == 3)
 check("默认停在标注页", win._pages.currentIndex() == 0)
 check("导航条有两个功能页按钮",
       win.btn_page_annot.text() == MODULE_ANNOT and win.btn_page_crop.text() == MODULE_CROP)

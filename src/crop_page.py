@@ -60,6 +60,8 @@ class CropPage(QWidget):
         self.path: Optional[str] = None
         self._dirty = False
         self._undo: List[list] = []
+        self._undo_revisions: List[int] = []
+        self._revision = self._saved_revision = self._next_revision = 0
         self._files: List[str] = []
         self._folder = ""
         self._rot_preview = False
@@ -354,8 +356,7 @@ class CropPage(QWidget):
         lay = QVBoxLayout(outer)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        # 四组内容在 1366×768 / 系统缩放 150% 下会放不下。放进滚动区，
-        # 并给内容一个最小高度，避免 QGroupBox 被压成 0 高（标注页侧栏踩过这个坑）。
+        # 裁剪、旋转和显示可滚动；保存及关闭文件固定在底部，小屏幕也能操作。
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -367,11 +368,11 @@ class CropPage(QWidget):
         v.addWidget(self._build_crop_group())
         v.addWidget(self._build_rotate_group())
         v.addWidget(self._build_display_group())
-        v.addWidget(self._build_save_group())
         v.addStretch(1)
         body.setMinimumHeight(660)
         scroll.setWidget(body)
         lay.addWidget(scroll)
+        lay.addWidget(self._build_save_group())
         return outer
 
     def _build_crop_group(self) -> QGroupBox:
@@ -550,8 +551,21 @@ class CropPage(QWidget):
         self.sld_size.setValue(14)
         self.sld_size.setToolTip(_tip("点显示大小（1.4 对应这里的 14）。",
                                       "点稀疏时调大更容易看清轮廓，不影响数据。"))
-        self.sld_size.valueChanged.connect(lambda x: self.view.set_point_size(x / 10.0))
-        f.addRow("点大小", self.sld_size)
+        self.sld_size.valueChanged.connect(self._on_point_size)
+        size_row = QHBoxLayout()
+        size_row.addWidget(self.sld_size, 1)
+        self.lbl_point_size = QLabel(f"{self.sld_size.value() / 10.0:.1f}")
+        self.lbl_point_size.setMinimumWidth(26)
+        self.lbl_point_size.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_point_size.setToolTip("当前点大小，与左侧滑块同步更新；只影响显示。")
+        size_row.addWidget(self.lbl_point_size)
+        f.addRow("点大小", size_row)
+
+        self.chk_bbox = QCheckBox("显示包围盒")
+        self.chk_bbox.setToolTip(_tip("显示当前点云的三维包围盒和长宽高。",
+                                     "包围盒随裁剪和旋转更新，只影响显示，不修改点云。"))
+        self.chk_bbox.toggled.connect(self.view.set_show_bbox)
+        f.addRow(self.chk_bbox)
         return g
 
     def _build_save_group(self) -> QGroupBox:
@@ -576,6 +590,12 @@ class CropPage(QWidget):
                                          "支持 e57 / ply / pcd / xyz / txt / csv；原文件保持不变。"))
         self.btn_save_as.clicked.connect(self.save_as)
         v.addWidget(self.btn_save_as)
+
+        self.btn_close = QPushButton("关闭当前文件 (Ctrl+W)")
+        self.btn_close.setToolTip(_tip("关闭裁剪页当前文件，清空视图和撤销记录。",
+                                      "有未保存改动时先询问；保留文件夹列表，磁盘文件不会被删除。"))
+        self.btn_close.clicked.connect(self.close_file)
+        v.addWidget(self.btn_close)
         return g
 
     # ---------------------------------------------------------- 快捷键 --
@@ -584,7 +604,8 @@ class CropPage(QWidget):
         self._shortcuts = []
         for seq, fn in (("Ctrl+S", self.save_overwrite),
                         ("Ctrl+Shift+S", self.save_as),
-                        ("Ctrl+Z", self.undo)):
+                        ("Ctrl+Z", self.undo),
+                        ("Ctrl+W", self.close_file)):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(fn)
@@ -701,8 +722,10 @@ class CropPage(QWidget):
         self.path = path
         self.ann = AnnotationSet.from_scans(doc.scans)
         self._undo.clear()
+        self._undo_revisions.clear()
+        self._revision = self._saved_revision = self._next_revision = 0
         self._dirty = False
-        self._rot_preview = False
+        self.reset_rotation()
         # 命令行 / 配准结果载入时也要把列表选中项跟过去，否则用户看不出
         # 视图里是哪一份文件
         for i in range(self.lst_files.count()):
@@ -718,17 +741,43 @@ class CropPage(QWidget):
 
     def reload(self) -> None:
         if self.path:
-            self._dirty = False
             self.load_file(self.path)
 
+    def has_unsaved_changes(self) -> bool:
+        preview = self._rot_preview and any(
+            abs(sp.value()) > 1e-9 for sp in (self.spn_rx, self.spn_ry, self.spn_rz))
+        return self.doc is not None and (self._dirty or preview)
+
     def _confirm_discard(self) -> bool:
-        if not self._dirty or self.doc is None:
+        if not self.has_unsaved_changes():
             return True
         r = QMessageBox.question(
             self, "未保存的改动",
-            "当前点云有未保存的裁剪/旋转改动，载入新文件会丢弃它们。\n是否继续？",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.No)
-        return r == QMessageBox.Yes
+            f"点云裁剪页有未保存的裁剪/旋转改动：\n{self.path or '未命名点云'}\n\n"
+            "是否先保存？选择放弃将丢弃这些改动（包括旋转预览）。",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Cancel)
+        if r == QMessageBox.Save:
+            self.save_as()
+            return not self.has_unsaved_changes()
+        return r == QMessageBox.Discard
+
+    def close_file(self) -> None:
+        if self.doc is None or not self._confirm_discard():
+            return
+        self.doc = self.ann = None
+        self.path = None
+        self._dirty = False
+        self._undo.clear()
+        self._undo_revisions.clear()
+        self._revision = self._saved_revision = self._next_revision = 0
+        self.reset_rotation()
+        self.view.clear_document()
+        self.rb_nav.setChecked(True)
+        self.lbl_region.setText("区域：未绘制")
+        self._refresh_info()
+        self._update_actions()
+        self.statusMessage.emit("已关闭裁剪页当前文件，可从文件列表重新载入。")
 
     # ------------------------------------------------------------ 视图 --
 
@@ -757,6 +806,10 @@ class CropPage(QWidget):
         self.view.set_canvas(name)
 
     # ------------------------------------------------------------ 区域 --
+
+    def _on_point_size(self, value: int) -> None:
+        self.view.set_point_size(value / 10.0)
+        self.lbl_point_size.setText(f"{value / 10.0:.1f}")
 
     def _region_hits(self, region) -> int:
         return int(self.view.region_mask(region, self.cmb_depth.currentData()).sum())
@@ -793,8 +846,15 @@ class CropPage(QWidget):
     def _snapshot(self) -> None:
         if self.doc is not None:
             self._undo.append(copy.deepcopy(self.doc.scans))
+            self._undo_revisions.append(self._revision)
             if len(self._undo) > 20:
                 self._undo.pop(0)
+                self._undo_revisions.pop(0)
+
+    def _mark_changed(self) -> None:
+        self._next_revision += 1
+        self._revision = self._next_revision
+        self._dirty = True
 
     def apply_crop(self) -> None:
         if self.doc is None:
@@ -831,7 +891,7 @@ class CropPage(QWidget):
                 masks.append(m if m.any() else None)
             before, after = apply_masks(self.doc, masks)
             self.ann = AnnotationSet.from_scans(self.doc.scans)
-            self._dirty = True
+            self._mark_changed()
             self.view.set_document(self.doc, self.ann)
             self.view.set_view(self.view.view_name)
             self._update_actions()
@@ -839,16 +899,19 @@ class CropPage(QWidget):
             self.statusMessage.emit(f"裁剪完成：{before:,} → {after:,} 点（删除 {before - after:,}）")
         except Exception as e:  # noqa: BLE001
             self._undo.pop()
+            self._undo_revisions.pop()
             QMessageBox.critical(self, "裁剪失败", str(e))
 
     def undo(self) -> None:
         if not self._undo or self.doc is None:
             return
         self.doc.scans = self._undo.pop()
+        self._revision = self._undo_revisions.pop()
+        self.reset_rotation()
         self.ann = AnnotationSet.from_scans(self.doc.scans)
         self.view.set_document(self.doc, self.ann)
         self.view.set_view(self.view.view_name)
-        self._dirty = bool(self._undo)
+        self._dirty = self._revision != self._saved_revision
         self._refresh_info()
         self._update_actions()
         self.statusMessage.emit("已撤销上一步")
@@ -915,7 +978,7 @@ class CropPage(QWidget):
         self._rot_preview = False
         self.btn_rot_preview.setChecked(False)
         self.view.set_preview_matrix(None)
-        self._dirty = True
+        self._mark_changed()
 
     def apply_rotation(self) -> None:
         if self.doc is None:
@@ -936,6 +999,7 @@ class CropPage(QWidget):
             self.statusMessage.emit("旋转已烘焙进点坐标（可用 Ctrl+Z 撤销）")
         except Exception as e:  # noqa: BLE001
             self._undo.pop()
+            self._undo_revisions.pop()
             QMessageBox.critical(self, "旋转失败", str(e))
 
     def reset_rotation(self) -> None:
@@ -984,13 +1048,10 @@ class CropPage(QWidget):
                 guess = first[1:] if first.startswith("*") else first
             path += guess or ext
         self._write(path)
-        self.path = path
-        self.lbl_path.setText(f"当前文件：{os.path.basename(path)}")
-        self.lbl_path.setToolTip(path)
 
-    def _write(self, path: str) -> None:
+    def _write(self, path: str) -> bool:
         if self.doc is None:
-            return
+            return False
         if self._rot_preview:
             # 预览未应用时直接保存会把未烘焙的姿态丢掉：先把旋转写进坐标，
             # 并刷新视图，保证屏幕上看到的和写进文件的是同一份数据。
@@ -1006,12 +1067,19 @@ class CropPage(QWidget):
                 cloudio.save(path, self.doc, self.ann)
         except Exception as e:  # noqa: BLE001
             QApplication.restoreOverrideCursor()
+            self._dirty = True
             QMessageBox.critical(self, "保存失败", f"{path}\n\n{e}")
-            return
+            return False
         QApplication.restoreOverrideCursor()
+        self.path = path
+        self._saved_revision = self._revision
         self._dirty = False
         self._refresh_info()
         self.statusMessage.emit(f"已保存 {path}  ·  {self.doc.total_points:,} 点")
+        QMessageBox.information(self, "保存成功",
+                                f"点云已保存：\n{path}\n\n"
+                                f"共 {self.doc.total_points:,} 个点，{len(self.doc.scans)} 个扫描。")
+        return True
 
     # ---------------------------------------------------------- 配准 --
 
@@ -1102,7 +1170,6 @@ class CropPage(QWidget):
                 f"{msg}\n\n是否立即载入结果查看？",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             if r == QMessageBox.Yes:
-                self._dirty = False
                 self.load_file(self.runner.output)
         else:
             QMessageBox.warning(self, "配准裁剪未完成", msg)
@@ -1113,6 +1180,7 @@ class CropPage(QWidget):
         if self.doc is None:
             self.lbl_info.setText("尚未载入点云")
             self.lbl_path.setText("当前文件：—")
+            self.lbl_path.setToolTip("")
             return
         lo = np.array([np.inf] * 3)
         hi = np.array([-np.inf] * 3)
@@ -1135,7 +1203,7 @@ class CropPage(QWidget):
     def _update_actions(self) -> None:
         has = self.doc is not None
         for w in (self.btn_apply, self.btn_clear_region, self.btn_undo,
-                  self.btn_reload, self.btn_save, self.btn_save_as,
+                  self.btn_reload, self.btn_save, self.btn_save_as, self.btn_close,
                   self.btn_rot_apply, self.btn_rot_preview, self.btn_rot_reset):
             w.setEnabled(has)
         self.btn_undo.setEnabled(has and bool(self._undo))

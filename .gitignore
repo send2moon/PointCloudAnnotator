@@ -1,0 +1,3 @@
+# Downloaded Point-SAM weights are installed locally, not committed to Git.
+models/point_sam/*.safetensors
+models/point_sam/*.part

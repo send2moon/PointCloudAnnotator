@@ -28,7 +28,7 @@ from PySide6.QtWidgets import QWidget
 
 from office_theme import BLUE, CANVAS_COLORS
 from renderer import PointCloudRenderer, point_in_polygon
-from view3d import draw_axis_and_legend
+from view3d import BOX_EDGES, draw_axis_and_legend
 
 MODE_NAV = "nav"
 MODE_RECT = "rect"
@@ -73,6 +73,7 @@ class CropView(QWidget):
         self.renderer.bg = CANVAS_COLORS["深色（默认）"]
         self.mode = MODE_NAV
         self.view_name = "等轴"
+        self.show_bbox = False
 
         self._base_xyz: Optional[np.ndarray] = None
         self._preview_m: Optional[np.ndarray] = None
@@ -182,6 +183,10 @@ class CropView(QWidget):
         self.renderer.invalidate()
         self._img = None
         self._schedule()
+
+    def set_show_bbox(self, show: bool) -> None:
+        self.show_bbox = bool(show)
+        self.update()
 
     def set_point_size(self, size: float) -> None:
         self.renderer.point_size = float(size)
@@ -318,6 +323,9 @@ class CropView(QWidget):
     def _draw_overlay(self, p: QPainter) -> None:
         p.setRenderHint(QPainter.Antialiasing, True)
 
+        if self.show_bbox and self.has_points():
+            self._draw_bbox(p)
+
         # 已确定的区域：淡蓝填充 + 蓝色虚线
         if self._region is not None:
             kind, data = self._region
@@ -366,6 +374,10 @@ class CropView(QWidget):
         p.setPen(QColor(255, 255, 255) if sum(self.renderer.bg) < 500 else QColor(43, 87, 154))
         tag = f"{self.view_name}   |   {self.n_points():,} 点"
         p.drawText(12, 22, tag)
+        if self.show_bbox and self.has_points():
+            lo, hi = self.renderer.bounds()
+            size = hi - lo
+            p.drawText(12, 42, f"尺寸 {size[0]:.2f} × {size[1]:.2f} × {size[2]:.2f} m")
         f.setBold(False)
         f.setPointSize(9)
         p.setFont(f)
@@ -375,6 +387,17 @@ class CropView(QWidget):
             MODE_POLY: "左键逐点点击   双击/右键/Enter 闭合   Backspace 退一点   Esc 取消",
         }.get(self.mode, "")
         p.drawText(12, self.height() - 12, hint)
+
+    def _draw_bbox(self, painter: QPainter) -> None:
+        lo, hi = self.renderer.bounds()
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0])
+                            for y in (lo[1], hi[1]) for z in (lo[2], hi[2])], np.float64)
+        sx, sy, depth = self.renderer.project_points(corners, self.width(), self.height())
+        painter.setPen(QPen(QColor(220, 80, 80, 220), 1.2, Qt.DashLine))
+        painter.setBrush(Qt.NoBrush)
+        for a, b in BOX_EDGES:
+            if depth[a] > 1e-6 and depth[b] > 1e-6:
+                painter.drawLine(QPointF(sx[a], sy[a]), QPointF(sx[b], sy[b]))
 
     @staticmethod
     def _paint_polygon(p: QPainter, poly: QPolygonF, line: QColor,
